@@ -1,0 +1,241 @@
+import face_recognition
+import cv2
+import numpy as np
+import os
+from datetime import datetime
+from PIL import Image, ImageFile
+import warnings
+
+# Suppress warnings
+warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+# Initialize directories
+KNOWN_FACES_DIR = "known_faces"
+TEMP_CAPTURE_DIR = "captured_faces"
+ATTENDANCE_FILE = "attendance.csv"
+
+
+def create_directories():
+    """Create required directories if they don't exist."""
+    os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
+    os.makedirs(TEMP_CAPTURE_DIR, exist_ok=True)
+    if not os.path.exists(ATTENDANCE_FILE):
+        with open(ATTENDANCE_FILE, "w") as f:
+            f.write("Name,Time\n")
+
+
+def validate_and_convert_image(image_path):
+    """Validate image and convert to RGB format if needed."""
+    try:
+        img = Image.open(image_path)
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        img_array = np.array(img)
+
+        # Verify the image has content
+        if img_array.size == 0:
+            raise ValueError("Empty image array")
+
+        return img_array
+    except Exception as e:
+        print(f"⚠ Error processing {os.path.basename(image_path)}: {str(e)}")
+        return None
+
+
+def load_known_faces():
+    """Load and encode known faces from directory."""
+    known_face_encodings = []
+    known_face_names = []
+
+    print("\n🔍 Loading known faces...")
+    if not os.listdir(KNOWN_FACES_DIR):
+        print("ℹ No faces found in 'known_faces' directory")
+        return known_face_encodings, known_face_names
+
+    for filename in os.listdir(KNOWN_FACES_DIR):
+        if filename.lower().endswith((".jpg", ".jpeg", ".png")):
+            image_path = os.path.join(KNOWN_FACES_DIR, filename)
+            image = validate_and_convert_image(image_path)
+
+            if image is not None:
+                try:
+                    encodings = face_recognition.face_encodings(image)
+                    if encodings:
+                        known_face_encodings.append(encodings[0])
+                        name = os.path.splitext(filename)[0]
+                        known_face_names.append(name)
+                        print(f"✅ Loaded: {name}")
+                    else:
+                        print(f"❌ No face detected in {filename}")
+                except Exception as e:
+                    print(f"⚠ Error encoding {filename}: {str(e)}")
+
+    return known_face_encodings, known_face_names
+
+
+def capture_new_face(name):
+    """Capture and save a new face image."""
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("❌ Error: Could not access camera")
+        return
+
+    print(f"\n📸 Capturing new face for {name}... (Press 'S' to save, 'Q' to cancel)")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("⚠ Warning: Could not read frame from camera")
+            break
+
+        cv2.imshow(f"Capture Face - {name}", frame)
+        key = cv2.waitKey(1)
+
+        if key == ord('s'):  # Save image
+            img_path = os.path.join(KNOWN_FACES_DIR, f"{name}.jpg")
+            success = cv2.imwrite(img_path, frame)
+            if success:
+                print(f"💾 Saved: {img_path}")
+            else:
+                print(f"❌ Failed to save {img_path}")
+            break
+        elif key == ord('q'):  # Quit without saving
+            print("🚫 Capture cancelled")
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+def mark_attendance(name):
+    """Record attendance with timestamp."""
+    try:
+        now = datetime.now()
+        current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+
+        with open(ATTENDANCE_FILE, "a") as f:
+            f.write(f"{name},{current_time}\n")
+
+        print(f"📝 Marked attendance for {name} at {current_time}")
+        return True
+    except Exception as e:
+        print(f"❌ Error saving attendance: {str(e)}")
+        return False
+
+
+def run_attendance_system():
+    """Main face recognition attendance system."""
+    create_directories()
+    known_face_encodings, known_face_names = load_known_faces()
+
+    if not known_face_encodings:
+        print("\n❌ No valid faces found. Please add clear frontal face images to 'known_faces' folder.")
+        print("Requirements:")
+        print("- JPG or PNG format")
+        print("- Single clear face per image")
+        print("- Well-lit, front-facing photos")
+        return
+
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("❌ Error: Could not access camera")
+        return
+
+    print("\n🎥 Starting face recognition... (Press 'Q' to quit)")
+
+    attendance_log = set()
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("⚠ Warning: Could not read frame from camera")
+                break
+
+            # Convert BGR to RGB and resize for faster processing
+            rgb_frame = cv2.resize(frame[:, :, ::-1], (0, 0), fx=0.5, fy=0.5)
+
+            # Detect faces
+            face_locations = face_recognition.face_locations(rgb_frame)
+            face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+
+            for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
+                # Scale back up face locations since we scaled down the frame
+                top *= 2
+                right *= 2
+                bottom *= 2
+                left *= 2
+
+                # Compare with known faces
+                matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
+                name = "Unknown"
+
+                # Find best match
+                face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+                best_match_idx = np.argmin(face_distances)
+
+                if matches[best_match_idx]:
+                    name = known_face_names[best_match_idx]
+
+                    # Mark attendance if not already logged
+                    if name not in attendance_log:
+                        if mark_attendance(name):
+                            attendance_log.add(name)
+
+                # Draw bounding box and label
+                cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+                cv2.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 255, 0), cv2.FILLED)
+                cv2.putText(frame, name, (left + 6, bottom - 6),
+                            cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 255, 255), 1)
+
+            cv2.imshow("Face Recognition Attendance", frame)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+    except Exception as e:
+        print(f"❌ Error during recognition: {str(e)}")
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        print("\n📊 Attendance Summary:")
+        if attendance_log:
+            for name in attendance_log:
+                print(f"👉 {name}")
+        else:
+            print("No attendance recorded.")
+        print("\n✅ Program ended.")
+
+
+def main_menu():
+    """Display main menu and handle user choices."""
+    print("\n" + "=" * 50)
+    print("👥 Face Recognition Attendance System")
+    print("=" * 50)
+
+    while True:
+        print("\nOptions:")
+        print("1. 📸 Capture new face")
+        print("2. 🎥 Start attendance system")
+        print("3. 🚪 Exit")
+
+        choice = input("Select an option (1/2/3): ").strip()
+
+        if choice == "1":
+            name = input("Enter person's name: ").strip()
+            if name:
+                capture_new_face(name)
+            else:
+                print("❌ Please enter a valid name")
+        elif choice == "2":
+            run_attendance_system()
+        elif choice == "3":
+            print("\n👋 Exiting program...")
+            break
+        else:
+            print("⚠ Invalid choice. Please enter 1, 2, or 3.")
+
+
+if _name_ == "_main_":
+    main_menu()
